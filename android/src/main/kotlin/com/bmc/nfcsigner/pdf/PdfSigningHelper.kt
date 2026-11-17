@@ -22,6 +22,14 @@ import java.util.*
 
 class PdfSigningHelper(private val context: Context) {
 
+    companion object {
+        /** ASN.1 DigestInfo prefix cho SHA-256 (RFC 8017 §9.2). */
+        private val SHA256_DIGEST_INFO_PREFIX = byteArrayOf(
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86.toByte(), 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+        )
+    }
+
     private val logger = DebugLogger("PdfSignerHelper")
 
     init {
@@ -43,7 +51,6 @@ class PdfSigningHelper(private val context: Context) {
         keyIndex: Int,
         reason: String,
         location: String,
-        pdfHashBytes: ByteArray,
         signatureConfig: SignatureConfig
     ): ByteArray {
         logger.debug("Starting PDF signing process (${pdfBytes.size} bytes)")
@@ -55,7 +62,7 @@ class PdfSigningHelper(private val context: Context) {
 
         val (pinVerified, triesLeft) = cardOperationManager.verifyPin(pin)
         if (!pinVerified) {
-            throw SecurityException("PIN verification failed. Tries left: $triesLeft")
+            throw PinVerificationException(triesLeft)
         }
 
         // Get certificate
@@ -82,7 +89,7 @@ class PdfSigningHelper(private val context: Context) {
             configureSignatureAppearance(signer, signatureConfig, reason, location)
 
             // Create external signature
-            val externalSignature = createExternalSignature(cardOperationManager, pdfHashBytes, keyIndex)
+            val externalSignature = createExternalSignature(cardOperationManager, keyIndex)
 
             // Perform signing
             logger.debug("Calling signDetached...")
@@ -232,18 +239,29 @@ class PdfSigningHelper(private val context: Context) {
             .endText()
     }
 
+    private fun sha256DigestInfo(data: ByteArray): ByteArray {
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(data)
+        return SHA256_DIGEST_INFO_PREFIX + hash
+    }
+
     private fun createExternalSignature(
         cardOperationManager: CardOperationManager,
-        pdfHashBytes: ByteArray,
         keyIndex: Int
     ): IExternalSignature {
         return object : IExternalSignature {
             override fun getHashAlgorithm(): String = "SHA-256"
             override fun getEncryptionAlgorithm(): String = "RSA"
 
+            /**
+             * [message] là DER của signed attributes trong CMS (chứa hash của
+             * phần PDF theo ByteRange). Đây mới là dữ liệu phải ký — hash do
+             * phía gọi truyền vào (hash cả file PDF) không thể khớp với nó.
+             * Thẻ ký PSO:CDS trên DigestInfo, nên băm SHA-256 rồi bọc DigestInfo.
+             */
             override fun sign(message: ByteArray): ByteArray {
-                logger.debug("Signing data, length: ${pdfHashBytes.size}")
-                return cardOperationManager.generateSignature(pdfHashBytes, keyIndex)
+                val digestInfo = sha256DigestInfo(message)
+                logger.debug("Signing CMS signed attributes (${message.size} bytes)")
+                return cardOperationManager.generateSignature(digestInfo, keyIndex)
             }
         }
     }
@@ -285,3 +303,6 @@ class PdfSigningHelper(private val context: Context) {
         return hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     }
 }
+/** Sai PIN khi ký PDF — để lớp plugin trả về AUTH_ERROR thay vì lỗi chung. */
+class PinVerificationException(val triesLeft: Int) :
+    SecurityException("PIN verification failed. Tries left: $triesLeft")

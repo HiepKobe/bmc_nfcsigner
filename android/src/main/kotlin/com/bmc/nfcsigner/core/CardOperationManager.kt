@@ -53,7 +53,7 @@ class CardOperationManager(private val transceiver: Transceiver) {
         val response = executeCommandWithGetResponse(command)
 
         if (!response.isSuccess) {
-            throw IOException("Signature generation failed: SW=${response.sw1.toString(16)}${response.sw2.toString(16)}")
+            throw CardStatusException("Signature generation failed", response.sw1, response.sw2)
         }
 
         return response.data
@@ -65,7 +65,7 @@ class CardOperationManager(private val transceiver: Transceiver) {
         val response = executeCommandWithGetResponse(command)
 
         if (!response.isSuccess) {
-            throw IOException("Get public key failed: SW=${response.sw1.toString(16)}${response.sw2.toString(16)}")
+            throw CardStatusException("Get public key failed", response.sw1, response.sw2)
         }
 
         return response.data
@@ -79,7 +79,7 @@ class CardOperationManager(private val transceiver: Transceiver) {
         val selectResponse = transceiver.transceive(selectCommand)
 
         if (!selectResponse.isSuccess) {
-            throw IOException("Select certificate failed: SW=${selectResponse.sw1.toString(16)}${selectResponse.sw2.toString(16)}")
+            throw CardStatusException("Select certificate failed", selectResponse.sw1, selectResponse.sw2)
         }
 
         // Get certificate
@@ -87,7 +87,7 @@ class CardOperationManager(private val transceiver: Transceiver) {
         val certResponse = executeCommandWithGetResponse(getCertCommand)
 
         if (!certResponse.isSuccess) {
-            throw IOException("Get certificate failed: SW=${certResponse.sw1.toString(16)}${certResponse.sw2.toString(16)}")
+            throw CardStatusException("Get certificate failed", certResponse.sw1, certResponse.sw2)
         }
 
         return certResponse.data
@@ -137,7 +137,7 @@ class CardOperationManager(private val transceiver: Transceiver) {
                 // Final chunk — handle GET RESPONSE for complete decrypted data
                 val response = executeCommandWithGetResponse(command)
                 if (!response.isSuccess) {
-                    throw IOException("PSO:DECIPHER failed: SW=${response.sw1.toString(16)}${response.sw2.toString(16)}")
+                    throw CardStatusException("PSO:DECIPHER failed", response.sw1, response.sw2)
                 }
                 return response.data
             } else {
@@ -156,6 +156,36 @@ class CardOperationManager(private val transceiver: Transceiver) {
         throw IOException("PSO:DECIPHER: no chunks to process")
     }
 
+    /** Ký bằng khóa AUT qua INTERNAL AUTHENTICATE. Cần VERIFY PIN mode 0x82 trước. */
+    fun internalAuthenticate(digestInfo: ByteArray): ByteArray {
+        logger.debug("INTERNAL AUTHENTICATE for ${digestInfo.size} bytes")
+        val response = executeCommandWithGetResponse(
+            ApduCommandBuilder.createInternalAuthenticateCommand(digestInfo)
+        )
+        if (!response.isSuccess) {
+            throw CardStatusException("INTERNAL AUTHENTICATE failed", response.sw1, response.sw2)
+        }
+        return response.data
+    }
+
+    /**
+     * Số lần nhập PIN (PW1) còn lại — byte thứ 5 của PW Status Bytes (OpenPGP).
+     */
+    fun getPinRetryCounter(): Int {
+        val response = executeCommandWithGetResponse(ApduCommandBuilder.createGetPwStatusCommand())
+        if (!response.isSuccess) {
+            throw CardStatusException("GET DATA C4 failed", response.sw1, response.sw2)
+        }
+        if (response.data.size < 5) {
+            throw IOException("PW Status Bytes quá ngắn: ${response.data.size} bytes")
+        }
+        return response.data[4].toInt() and 0xFF
+    }
+
     private fun ByteArray.toHexString(): String =
         joinToString("") { "%02x".format(it) }
 }
+
+/** Thẻ trả SW khác 9000 — giữ lại SW để báo lên Dart. */
+class CardStatusException(message: String, val sw1: Int, val sw2: Int) :
+    IOException("$message: SW=%02X%02X".format(sw1, sw2))

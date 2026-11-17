@@ -184,7 +184,6 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final pdfBytes = result.files.single.bytes!;
-    final pdfDigestInfoBytes = CryptoUtils.createSha256DigestInfo(pdfBytes);
     setState(() { _statusMessage = 'Đã chọn file. Vui lòng chạm thẻ để ký...'; });
 
     // 2. Tạo cấu hình chữ ký (có thể lấy ảnh từ assets hoặc file)
@@ -204,7 +203,6 @@ class _HomePageState extends State<HomePage> {
     // 3. Gọi plugin để ký
     final signResult = await Nfcsigner.signPdf(
       pdfBytes: pdfBytes,
-      pdfHashBytes: pdfDigestInfoBytes,
       appletID: 'D27600012401',
       pin: '123456',
       reason: 'Ky nhay tam thoi',

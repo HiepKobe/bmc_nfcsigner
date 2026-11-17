@@ -193,7 +193,7 @@ class UsbTransceiver(
 
     @Throws(IOException::class)
     override fun transceive(command: ByteArray): ApduResponse {
-        logger.debug("USB → ${command.toHexString()} (${command.size} bytes)")
+        logger.debug("USB → ${DebugLogger.redactCommand(command)}")
 
         val ccidMessage = createCcidMessage(command)
 
@@ -206,7 +206,7 @@ class UsbTransceiver(
         // Receive response — with time extension, CCID chaining, and composite device handling
         val ccidResponse = readFullCcidResponse()
 
-        logger.debug("USB ← (${ccidResponse.size} bytes) ${ccidResponse.toHexString()}")
+        logger.debug("USB ← CCID ${ccidResponse.size} bytes")
 
         return parseCcidResponse(ccidResponse)
     }

@@ -172,7 +172,7 @@ class UsbCardManager: NSObject {
             return
         }
         
-        logger.debug("TX: \(apdu.hexString)")
+        logger.debug("TX: \(apdu.redactedApdu)")
         
         if isCompositeDevice {
             // Composite: send via CCID tunnel with chunked response
@@ -198,7 +198,7 @@ class UsbCardManager: NSObject {
                 let sw2 = response[response.count - 1]
                 let data = response.dropLast(2)
                 
-                self.logger.debug("RX: \(response.hexString) (SW: \(String(format: "%02X%02X", sw1, sw2)))")
+                self.logger.debug("RX: \(response.count) bytes (SW: \(String(format: "%02X%02X", sw1, sw2)))")
                 completion(Data(data), sw1, sw2, nil)
             }
         }
@@ -222,7 +222,7 @@ class UsbCardManager: NSObject {
         }
         
         tunnelApdu.append(apdu)
-        logger.debug("Tunnel TX: \(tunnelApdu.hexString) (\(apdu.count) bytes payload)")
+        logger.debug("Tunnel TX: \(apdu.redactedApdu)")
         
         card.transmit(tunnelApdu) { [weak self] response, error in
             guard let self = self else { return }
@@ -319,7 +319,7 @@ class UsbCardManager: NSObject {
         let sw2 = cardResponse[cardResponse.count - 1]
         let data = cardResponse.dropLast(2)
         
-        logger.debug("RX: \(cardResponse.hexString) (SW: \(String(format: "%02X%02X", sw1, sw2)))")
+        logger.debug("RX: \(cardResponse.count) bytes (SW: \(String(format: "%02X%02X", sw1, sw2)))")
         completion(Data(data), sw1, sw2, nil)
     }
     
@@ -670,6 +670,18 @@ class UsbCardManager: NSObject {
 extension Data {
     var hexString: String {
         return map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    /// Mô tả APDU để log mà không lộ bí mật: chỉ header và độ dài dữ liệu.
+    /// VERIFY / CHANGE REFERENCE DATA / RESET RETRY COUNTER mang PIN dạng rõ.
+    var redactedApdu: String {
+        guard count >= 4 else { return "(\(count) bytes)" }
+        let header = prefix(4).map { String(format: "%02X", $0) }.joined()
+        let dataLen = count > 5 ? count - 5 : 0
+        switch self[startIndex + 1] {
+        case 0x20, 0x24, 0x2C: return "\(header) [secret: \(dataLen) bytes]"
+        default: return "\(header) [data: \(dataLen) bytes]"
+        }
     }
 }
 

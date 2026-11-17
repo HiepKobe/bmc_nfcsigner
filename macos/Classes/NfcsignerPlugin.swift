@@ -323,7 +323,7 @@ private class MacUsbCardManager {
             return
         }
         
-        logger.debug("TX: \(apdu.hexString)")
+        logger.debug("TX: \(apdu.redactedApdu)")
         
         if isCompositeDevice {
             transmitViaTunnel(card: card, apdu: apdu, completion: completion)
@@ -747,6 +747,18 @@ private class MacUsbCardManager {
 private extension Data {
     var hexString: String {
         return map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    /// Mô tả APDU để log mà không lộ bí mật: chỉ header và độ dài dữ liệu.
+    /// VERIFY / CHANGE REFERENCE DATA / RESET RETRY COUNTER mang PIN dạng rõ.
+    var redactedApdu: String {
+        guard count >= 4 else { return "(\(count) bytes)" }
+        let header = prefix(4).map { String(format: "%02X", $0) }.joined()
+        let dataLen = count > 5 ? count - 5 : 0
+        switch self[startIndex + 1] {
+        case 0x20, 0x24, 0x2C: return "\(header) [secret: \(dataLen) bytes]"
+        default: return "\(header) [data: \(dataLen) bytes]"
+        }
     }
 }
 

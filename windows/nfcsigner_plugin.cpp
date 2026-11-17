@@ -295,6 +295,8 @@ void NfcsignerPlugin::HandleMethodCall(
     HandleGetPinRetryCounter(args, std::move(result));
   } else if (method_call.method_name().compare("generateSignature") == 0) {
     HandleSign(args, std::move(result));
+  } else if (method_call.method_name().compare("internalAuthenticate") == 0) {
+    HandleInternalAuthenticate(args, std::move(result));
   } else if (method_call.method_name().compare("getRsaPublicKey") == 0) {
     HandleGetPublicKey(args, std::move(result));
   } else if (method_call.method_name().compare("getCertificate") == 0) {
@@ -611,6 +613,55 @@ void NfcsignerPlugin::HandleSign(
       shared_result);
 }
 
+// INTERNAL AUTHENTICATE (INS 0x88) bằng khóa AUT, PIN mode 0x82.
+void NfcsignerPlugin::HandleInternalAuthenticate(
+    const flutter::EncodableMap *args,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  flutter::EncodableMap copied_args =
+      (args != nullptr) ? *args : flutter::EncodableMap();
+  auto shared_result =
+      std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+          result.release());
+  CardOperation(
+      [this, copied_args = std::move(copied_args),
+       shared_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
+        auto appletID = std::get<std::string>(
+            copied_args.at(flutter::EncodableValue("appletID")));
+        auto pin = std::get<std::string>(
+            copied_args.at(flutter::EncodableValue("pin")));
+        auto dataToSign = std::get<std::vector<uint8_t>>(
+            copied_args.at(flutter::EncodableValue("dataToSign")));
+        if (dataToSign.empty() || dataToSign.size() > 255) {
+          throw CardError("INVALID_PARAMETERS",
+                          "Dữ liệu INTERNAL AUTHENTICATE phải từ 1 đến 255 byte.");
+        }
+
+        auto select_resp = TransmitAndGetResponse(
+            hCard, CreateSelectAppletCommand(appletID), dwActiveProtocol);
+        if (!IsSelectAppletSuccess(select_resp)) {
+          throw CardError("APPLET_NOT_SELECTED", "Chọn Applet thất bại.");
+        }
+
+        auto verify_resp = TransmitAndGetResponse(
+            hCard, CreateVerifyDecryptPinCommand(pin), dwActiveProtocol);
+        CheckVerifyPinResponse(verify_resp);
+
+        std::vector<uint8_t> cmd = {0x00, 0x88, 0x00, 0x00,
+                                    (uint8_t)dataToSign.size()};
+        cmd.insert(cmd.end(), dataToSign.begin(), dataToSign.end());
+        cmd.push_back(0x00);
+        auto resp = TransmitAndGetResponse(hCard, cmd, dwActiveProtocol);
+        if (resp.size() < 2 || resp[resp.size() - 2] != 0x90 ||
+            resp.back() != 0x00) {
+          throw CardError("OPERATION_NOT_SUPPORTED",
+                          "INTERNAL AUTHENTICATE thất bại.");
+        }
+        std::vector<uint8_t> signature_data(resp.begin(), resp.end() - 2);
+        shared_result->Success(flutter::EncodableValue(signature_data));
+      },
+      shared_result);
+}
+
 void NfcsignerPlugin::HandleGetPublicKey(
     const flutter::EncodableMap *args,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -737,16 +788,11 @@ void NfcsignerPlugin::HandleSignPdf(
             signatureLength = std::get<int>(sigLen_iter->second);
           }
 
-          auto data_to_send_to_card = std::get<std::vector<uint8_t>>(
-              copied_args.at(flutter::EncodableValue("pdfHashBytes")));
-          if (data_to_send_to_card.empty()) {
-            throw CardError("INVALID_PARAMETERS",
-                            "pdfHashBytes cannot be empty.");
-          }
           double x = 50.0, y = 700.0, width = 200.0, height = 50.0;
           int pageNumber = 1;
-          std::string contact = "info@bmctech.vn";
-          std::string signerName = "BMC T&S JSC";
+          // Không đặt giá trị mặc định: tên người ký phải đến từ bên gọi.
+          std::string contact;
+          std::string signerName;
 
           auto config_iter =
               copied_args.find(flutter::EncodableValue("signatureConfig"));
@@ -1129,12 +1175,14 @@ void NfcsignerPlugin::HandleSignPdf(
               return;
             }
 
-            std::vector<uint8_t> hash_to_sign_vec;
-            if (!hashToSign.empty()) {
-              hash_to_sign_vec.assign(hashToSign.begin(), hashToSign.end());
-            } else {
-              hash_to_sign_vec = data_to_send_to_card;
+            // ServiceDoWrapDigest: hashToSign đã là DigestInfo(SHA-256 của
+            // signed attributes) — đúng dữ liệu thẻ phải ký.
+            if (hashToSign.empty()) {
+              throw CardError("OPERATION_NOT_SUPPORTED",
+                              "PoDoFo không cung cấp dữ liệu cần ký.");
             }
+            std::vector<uint8_t> hash_to_sign_vec(hashToSign.begin(),
+                                                  hashToSign.end());
 
             auto sign_resp = TransmitAndGetResponse(
                 hCard,

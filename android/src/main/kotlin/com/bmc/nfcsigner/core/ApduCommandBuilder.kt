@@ -88,4 +88,18 @@ object ApduCommandBuilder {
             if (isLast) apdu + byteArrayOf(0x00) else apdu  // Le=0x00 only on last
         }
     }
+
+    /**
+     * INTERNAL AUTHENTICATE (INS 0x88) — ký bằng khóa AUT.
+     * [digestInfo] là DigestInfo thuần; thẻ tự thêm padding PKCS#1 v1.5.
+     */
+    fun createInternalAuthenticateCommand(digestInfo: ByteArray): ByteArray {
+        require(digestInfo.size in 1..255) { "Dữ liệu INTERNAL AUTHENTICATE phải từ 1 đến 255 byte" }
+        return byteArrayOf(0x00, 0x88.toByte(), 0x00, 0x00, digestInfo.size.toByte()) +
+            digestInfo + byteArrayOf(0x00)
+    }
+
+    /** GET DATA PW Status Bytes (tag C4). */
+    fun createGetPwStatusCommand(): ByteArray =
+        byteArrayOf(0x00, 0xCA.toByte(), 0x00, 0xC4.toByte(), 0x00)
 }

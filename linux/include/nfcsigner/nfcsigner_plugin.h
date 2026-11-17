@@ -1,50 +1,26 @@
-#pragma once
+#ifndef FLUTTER_PLUGIN_NFCSIGNER_PLUGIN_H_
+#define FLUTTER_PLUGIN_NFCSIGNER_PLUGIN_H_
 
+#include <flutter_linux/flutter_linux.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <winscard.h>
+G_BEGIN_DECLS
+
+#ifdef FLUTTER_PLUGIN_IMPL
+#define FLUTTER_PLUGIN_EXPORT __attribute__((visibility("default")))
 #else
-#include <PCSC/winscard.h>
-#include <PCSC/wintypes.h>
+#define FLUTTER_PLUGIN_EXPORT
 #endif
 
-//#include <flutter/method_channel.h>
-#include <flutter/plugin_registrar.h>
-#include <flutter/standard_method_codec.h>
+typedef struct _NfcsignerPlugin NfcsignerPlugin;
+typedef struct {
+  GObjectClass parent_class;
+} NfcsignerPluginClass;
 
-#include <memory>
-#include <string>
-#include <vector>
+FLUTTER_PLUGIN_EXPORT GType nfcsigner_plugin_get_type();
 
-namespace nfcsigner {
+FLUTTER_PLUGIN_EXPORT void nfcsigner_plugin_register_with_registrar(
+    FlPluginRegistrar* registrar);
 
-    class NfcsignerPlugin : public flutter::Plugin {
-    public:
-        static void RegisterWithRegistrar(flutter::PluginRegistrar* registrar);
+G_END_DECLS
 
-        NfcsignerPlugin();
-        virtual ~NfcsignerPlugin();
-
-        // Disallow copy and assign.
-        NfcsignerPlugin(const NfcsignerPlugin&) = delete;
-        NfcsignerPlugin& operator=(const NfcsignerPlugin&) = delete;
-
-    private:
-        void HandleMethodCall(
-                const flutter::MethodCall<flutter::EncodableValue>& method_call,
-                std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-
-        // Helper methods
-        std::vector<uint8_t> TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command);
-        void HandleSign(const flutter::EncodableMap* args,
-                        std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-        void HandleGetPublicKey(const flutter::EncodableMap* args,
-                                std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-        void HandleGetCertificate(const flutter::EncodableMap* args,
-                                  std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-        void HandleSignPdf(const flutter::EncodableMap* args,
-                           std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-    };
-
-}  // namespace nfcsig
+#endif  // FLUTTER_PLUGIN_NFCSIGNER_PLUGIN_H_

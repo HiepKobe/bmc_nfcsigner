@@ -32,18 +32,15 @@ class NfcTransceiver(private val isoDep: IsoDep) : Transceiver {
 
     @Throws(IOException::class)
     override fun transceive(command: ByteArray): ApduResponse {
-        logger.debug("NFC → ${command.toHexString()}")
+        logger.debug("NFC → ${DebugLogger.redactCommand(command)}")
 
         connect()
 
         val response = isoDep.transceive(command)
         val apduResponse = ResponseHandler.parseResponse(response)
 
-        logger.debug("NFC ← ${response.toHexString()} [SW: ${apduResponse.sw1.toString(16)}${apduResponse.sw2.toString(16)}]")
+        logger.debug("NFC ← ${DebugLogger.describeResponse(apduResponse.data, apduResponse.sw1, apduResponse.sw2)}")
 
         return apduResponse
     }
-
-    private fun ByteArray.toHexString(): String =
-        joinToString("") { "%02x".format(it) }
 }

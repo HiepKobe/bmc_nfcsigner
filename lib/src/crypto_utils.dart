@@ -14,7 +14,7 @@ class CryptoUtils {
     ///     OBJECT IDENTIFIER (06) + Length (09) + OID for sha256 (60 86 48 01 65 03 04 02 01) +
     ///     NULL (05) + Length (00) +
     ///   OCTET STRING (04) + Length (20)
-    final _sha256DigestInfoPrefix = [
+    final sha256DigestInfoPrefix = [
       0x30,
       0x31,
       0x30,
@@ -43,7 +43,7 @@ class CryptoUtils {
 
     // 2. Nối tiền tố ASN.1 với kết quả băm để tạo thành DigestInfo
     final builder = BytesBuilder();
-    builder.add(_sha256DigestInfoPrefix);
+    builder.add(sha256DigestInfoPrefix);
     builder.add(hash);
 
     return builder.toBytes();
