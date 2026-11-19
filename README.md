@@ -176,34 +176,46 @@ class _MyCardScreenState extends State<MyCardScreen> {
 * **Android**: log gỡ lỗi chỉ bật khi ứng dụng là bản debuggable và không bao giờ ghi PIN hay dữ liệu đã giải mã.
 * **Giấy phép**: trên Android, plugin dùng iText 7 (AGPL). Ứng dụng phân phối kèm plugin phải tuân thủ AGPL hoặc mua giấy phép thương mại iText.
 
-## 📱 Ký PDF bằng SIM-PKI (MSSP – Ban Cơ yếu Chính phủ)
+## 📱 Ký PDF bằng chữ ký từ dịch vụ ngoài (SIM-PKI / MSSP)
 
-Plugin gọi thẳng dịch vụ MSSP (`https://mpki1.ca.gov.vn:18083/soap/services/`), không cần máy chủ trung gian.
+Plugin không gọi MSSP. Project gọi API ký số (ví dụ `MSS_Signature` của MSSP Ban Cơ yếu) tự lo việc đó; plugin chỉ chuẩn bị PDF và ghép chữ ký trả về thành PDF đã ký.
 
-```dart
-final config = MsspConfig(
-  apId: apIdNguoiDungNhap,                 // APID do Cục CTSBMTT cấp
-  apPassword: matKhauApNguoiDungNhap,      // mật khẩu AP — KHÔNG phải PIN SIM
-  clientCertificate: p12Bytes,             // chứng thư số AP (.p12)
-  clientCertificatePassword: matKhauP12,
-);
+Thêm plugin vào project khác:
 
-final result = await Nfcsigner.signPdfWithSim(
-  pdfBytes: pdf,
-  phone: '0912345678',
-  mssp: config,
-  reason: 'Phê duyệt',
-  signatureConfig: PdfSignatureConfig(signerName: 'Nguyễn Văn A'),
-  // Hiện mã này cho người dùng đối chiếu với mã trên điện thoại trước khi nhập PIN.
-  onVerificationCode: (code) => showCode(code),
-);
+```yaml
+dependencies:
+  nfcsigner:
+    git: https://github.com/bmctechvn/nfcsigner   # hoặc  path: ../bmc_nfcsigner
 ```
 
-* **PIN của SIM không đi qua app.** MSSP gửi yêu cầu xuống SIM, điện thoại hiện "Ma giao dich 123456…", người dùng nhập PIN trên hộp thoại của SIM. Hàm chờ tối đa 300 giây.
-* Kết nối dùng TLS 1.2 hai chiều bằng chứng thư số AP; máy chủ MSSP được xác thực bằng RootCA/SubCA của Ban Cơ yếu (kèm plugin, hết hạn 03/2030) và kho CA hệ thống. Hỗ trợ cả `.p12` định dạng cũ (RC2/3DES) như file Cục cấp.
-* **Điều kiện từ phía MSSP:** APID gắn với IP đã đăng ký. Nếu thiết bị ra Internet bằng IP khác, MSSP trả lỗi 104/105 — cần thống nhất với Cục CTSBMTT (ví dụ đi qua VPN của cơ quan).
-* Lưu APID, mật khẩu AP và file `.p12` trong Keychain / Android Keystore; không gắn cứng trong mã nguồn.
-* Mã lỗi MSSP (401 người dùng huỷ, 402 PIN bị khoá, 208 hết thời gian, 422 chưa có chứng thư…) được trả trong `ServiceResult.message`.
+```dart
+import 'package:nfcsigner/nfcsigner.dart';
+
+// 1. Chuẩn bị PDF, lấy dữ liệu cần ký.
+final prep = await Nfcsigner.preparePdfSignature(
+  pdfBytes: pdf,
+  reason: 'Phê duyệt',
+  signatureConfig: PdfSignatureConfig(signerName: 'Nguyễn Văn A'),
+);
+final prepared = prep.data!;
+
+// 2. Gọi API ký số (ở project của bạn). DataToBeSigned = DigestInfo SHA-256,
+//    MSS_Format = http://uri.etsi.org/TS102204/v1.1.2#PKCS1.
+final signature   = await goiMssSignature(prepared.dataToBeSigned); // Base64Signature
+final certificate = await goiMssRegistration(phone);               // X509Certificate
+
+// 3. Ghép chữ ký vào PDF.
+final signed = Nfcsigner.completePdfSignature(
+  prepared: prepared,
+  signature: signature,       // byte thô hoặc base64
+  certificate: certificate,   // DER, base64 (kể cả 2 lớp) hoặc PEM
+);
+if (signed.isSuccess) File('signed.pdf').writeAsBytesSync(signed.data!);
+```
+
+* Nếu bước 2 diễn ra ở nơi khác hoặc phải chờ lâu, lưu `prepared.toJson()` và khôi phục bằng `PdfPreparedSignature.fromJson(...)`.
+* `prepared.hash` là SHA-256 thô (32 byte) cho dịch vụ ký chỉ nhận hash.
+* Chữ ký được kiểm tra với certificate trước khi ghi; sai dữ liệu hoặc sai certificate trả lỗi thay vì tạo PDF hỏng.
 
 ## 📚 API Chi tiết
 

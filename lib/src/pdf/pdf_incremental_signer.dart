@@ -69,6 +69,7 @@ class PdfIncrementalSigner {
   /// Số byte dành sẵn cho CMS (đủ cho RSA-4096 + chuỗi certificate dài).
   static const defaultReservedBytes = 8192;
 
+  /// Ký trong một lần: [prepare] → [signer] → [complete].
   static Future<Uint8List> sign({
     required Uint8List pdf,
     required PdfSignatureField field,
@@ -76,6 +77,29 @@ class PdfIncrementalSigner {
     DateTime? signingTime,
     int reservedBytes = defaultReservedBytes,
   }) async {
+    final prepared = prepare(
+      pdf: pdf,
+      field: field,
+      signingTime: signingTime,
+      reservedBytes: reservedBytes,
+    );
+    final result = await signer(prepared.dataToBeSigned);
+    return complete(
+      prepared: prepared,
+      signature: result.signature,
+      certificate: result.certificate,
+    );
+  }
+
+  /// Bước 1: thêm trường chữ ký (vùng /Contents để trống) và tính dữ liệu cần
+  /// ký. Gửi [PdfPreparedSignature.dataToBeSigned] (DigestInfo SHA-256) tới
+  /// dịch vụ ký, rồi gọi [complete] với chữ ký nhận được.
+  static PdfPreparedSignature prepare({
+    required Uint8List pdf,
+    required PdfSignatureField field,
+    DateTime? signingTime,
+    int reservedBytes = defaultReservedBytes,
+  }) {
     final doc = PdfDocument.parse(pdf);
     final time = signingTime ?? DateTime.now();
     final pages = doc.pageRefs();
@@ -323,27 +347,48 @@ class PdfIncrementalSigner {
       contentDigest: Uint8List.fromList(digest),
       signingTime: time,
     );
-    final digestInfo = CryptoUtils.createSha256DigestInfo(signedAttrs);
-    final result = await signer(digestInfo);
+    return PdfPreparedSignature(
+      pdf: bytes,
+      contentsOffset: contentsStart,
+      reservedBytes: reservedBytes,
+      signedAttributes: signedAttrs,
+    );
+  }
+
+  /// Bước 2: ghép chữ ký RSA PKCS#1 v1.5 ([signature], ký trên
+  /// [PdfPreparedSignature.dataToBeSigned]) và [certificate] (DER) của người ký
+  /// thành CMS, ghi vào PDF đã chuẩn bị. Trả về PDF đã ký.
+  ///
+  /// Ném [PdfSignatureMismatchException] nếu chữ ký không khớp dữ liệu hoặc
+  /// certificate; [ArgumentError] nếu [prepared] không còn nguyên vẹn.
+  static Uint8List complete({
+    required PdfPreparedSignature prepared,
+    required Uint8List signature,
+    required Uint8List certificate,
+  }) {
+    prepared.checkIntegrity();
     // Chặn chữ ký sai trước khi ghi file: ký nhầm dữ liệu hoặc certificate
     // không thuộc khoá đã ký đều cho ra PDF không verify được.
     if (!RsaVerifier.verify(
-      certificate: result.certificate,
-      digestInfo: digestInfo,
-      signature: result.signature,
+      certificate: certificate,
+      digestInfo: prepared.dataToBeSigned,
+      signature: signature,
     )) {
       throw PdfSignatureMismatchException();
     }
     final cms = CmsSigner.build(
-      signedAttrs: signedAttrs,
-      signature: result.signature,
-      certificate: result.certificate,
+      signedAttrs: prepared.signedAttributes,
+      signature: signature,
+      certificate: certificate,
     );
-    if (cms.length > reservedBytes) {
-      throw StateError('Chữ ký (${cms.length} byte) vượt vùng dành sẵn ($reservedBytes byte)');
+    if (cms.length > prepared.reservedBytes) {
+      throw StateError(
+          'Chữ ký (${cms.length} byte) vượt vùng dành sẵn (${prepared.reservedBytes} byte)');
     }
+    final bytes = Uint8List.fromList(prepared.pdf);
     final hex = cms.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    bytes.setRange(contentsStart + 1, contentsStart + 1 + hex.length, latin1.encode(hex));
+    final start = prepared.contentsOffset + 1;
+    bytes.setRange(start, start + hex.length, latin1.encode(hex));
     return bytes;
   }
 
@@ -417,4 +462,87 @@ class PdfSignatureMismatchException implements Exception {
   @override
   String toString() =>
       'Chữ ký không hợp lệ với certificate (ký sai dữ liệu hoặc sai certificate)';
+}
+
+/// PDF đã chuẩn bị chờ chữ ký (kết quả của [PdfIncrementalSigner.prepare]).
+///
+/// Lưu được qua [toJson] / [fromJson] khi bước ký diễn ra ở nơi khác hoặc mất
+/// nhiều thời gian (ví dụ chờ người dùng xác nhận ký trên SIM).
+class PdfPreparedSignature {
+  PdfPreparedSignature({
+    required this.pdf,
+    required this.contentsOffset,
+    required this.reservedBytes,
+    required this.signedAttributes,
+  });
+
+  /// PDF đã có trường chữ ký, /ByteRange đã điền, /Contents còn toàn số 0.
+  final Uint8List pdf;
+
+  /// Vị trí ký tự `<` mở đầu /Contents trong [pdf].
+  final int contentsOffset;
+
+  /// Số byte dành cho CMS trong /Contents.
+  final int reservedBytes;
+
+  /// Signed attributes của CMS (SET, DER) — dữ liệu thực sự được ký.
+  final Uint8List signedAttributes;
+
+  /// DigestInfo(SHA-256(signedAttributes)) — đưa vào `DataToBeSigned` khi gọi
+  /// dịch vụ ký (MSSP `MSS_Signature`, MSS_Format PKCS1).
+  Uint8List get dataToBeSigned => CryptoUtils.createSha256DigestInfo(signedAttributes);
+
+  /// SHA-256(signedAttributes), 32 byte — cho dịch vụ ký nhận hash thô.
+  Uint8List get hash => Uint8List.fromList(sha256.convert(signedAttributes).bytes);
+
+  Map<String, dynamic> toJson() => {
+        'pdf': base64.encode(pdf),
+        'contentsOffset': contentsOffset,
+        'reservedBytes': reservedBytes,
+        'signedAttributes': base64.encode(signedAttributes),
+      };
+
+  factory PdfPreparedSignature.fromJson(Map<String, dynamic> json) {
+    final p = PdfPreparedSignature(
+      pdf: base64.decode(json['pdf'] as String),
+      contentsOffset: json['contentsOffset'] as int,
+      reservedBytes: json['reservedBytes'] as int,
+      signedAttributes: base64.decode(json['signedAttributes'] as String),
+    );
+    p.checkIntegrity();
+    return p;
+  }
+
+  /// Kiểm tra [pdf] vẫn là file đã chuẩn bị: vùng /Contents còn trống và hash
+  /// các vùng /ByteRange khớp messageDigest trong [signedAttributes].
+  void checkIntegrity() {
+    final end = contentsOffset + reservedBytes * 2 + 1;
+    if (contentsOffset < 0 || end >= pdf.length || pdf[contentsOffset] != 0x3C || pdf[end] != 0x3E) {
+      throw ArgumentError('Dữ liệu chuẩn bị không hợp lệ: không thấy vùng /Contents');
+    }
+    for (var i = contentsOffset + 1; i < end; i++) {
+      if (pdf[i] != 0x30) {
+        throw ArgumentError('PDF đã được ghi chữ ký hoặc bị sửa sau bước chuẩn bị');
+      }
+    }
+    final sink = _DigestSink();
+    sha256.startChunkedConversion(sink)
+      ..add(Uint8List.sublistView(pdf, 0, contentsOffset))
+      ..add(Uint8List.sublistView(pdf, end + 1))
+      ..close();
+    if (!_contains(signedAttributes, sink.value.bytes)) {
+      throw ArgumentError('PDF không khớp với dữ liệu đã ký (bị sửa sau bước chuẩn bị)');
+    }
+  }
+
+  static bool _contains(List<int> hay, List<int> needle) {
+    outer:
+    for (var i = 0; i <= hay.length - needle.length; i++) {
+      for (var j = 0; j < needle.length; j++) {
+        if (hay[i + j] != needle[j]) continue outer;
+      }
+      return true;
+    }
+    return false;
+  }
 }

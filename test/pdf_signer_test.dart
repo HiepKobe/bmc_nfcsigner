@@ -166,4 +166,80 @@ void main() {
         signatureConfig: const PdfSignatureConfig(pageNumber: 5));
     expect(r.status, CardStatus.invalidParameters);
   });
+
+  group('ký bằng chữ ký từ dịch vụ ngoài (MSSP)', () {
+    test('prepare → ký DigestInfo → complete, nhận base64 như MSSP trả về', () async {
+      final pdf = _minimalPdf(1);
+      final prep = await Nfcsigner.preparePdfSignature(
+        pdfBytes: pdf,
+        reason: 'Phê duyệt',
+        signatureConfig: PdfSignatureConfig(signerName: 'Nguyễn Văn A'),
+      );
+      expect(prep.isSuccess, isTrue, reason: prep.message);
+      final prepared = prep.data!;
+      expect(prepared.dataToBeSigned.length, 51); // DigestInfo SHA-256
+      expect(prepared.dataToBeSigned.sublist(19), prepared.hash);
+
+      // Lưu / khôi phục giữa hai bước.
+      final restored = PdfPreparedSignature.fromJson(
+          jsonDecode(jsonEncode(prepared.toJson())) as Map<String, dynamic>);
+
+      // MSSP: Base64Signature (base64) và certificate base64 hai lớp (vgca.mssp.jar).
+      final sigB64 = utf8.encode(base64.encode(testRsaSign(restored.dataToBeSigned)));
+      final certB64x2 = utf8.encode(base64.encode(utf8.encode(_certB64)));
+      final r = Nfcsigner.completePdfSignature(
+        prepared: restored,
+        signature: Uint8List.fromList(sigB64),
+        certificate: Uint8List.fromList(certB64x2),
+      );
+      expect(r.isSuccess, isTrue, reason: r.message);
+      final out = r.data!;
+      expect(out.sublist(0, pdf.length), pdf);
+      expect(out.length, prepared.pdf.length);
+
+      final doc = PdfDocument.parse(out);
+      final page = doc.resolve(doc.pageRefs()[0]) as PdfDict;
+      final widget = doc.resolve((doc.resolve(page['Annots']) as PdfArray).items.single) as PdfDict;
+      final sig = doc.resolve(widget['V']) as PdfDict;
+      final cms = (sig['Contents'] as PdfString).bytes;
+      final signerInfo = DerElement.read(Uint8List.fromList(cms), 0)
+          .children()[1].children().first.children().last.children().first;
+      final attrs = Uint8List.fromList(signerInfo.children()[3].encoded)..[0] = 0x31;
+      expect(attrs, prepared.signedAttributes);
+      expect(signerInfo.children().last.content, testRsaSign(prepared.dataToBeSigned));
+    });
+
+    test('chữ ký không khớp → lỗi, không trả PDF', () async {
+      final prepared = (await Nfcsigner.preparePdfSignature(pdfBytes: _minimalPdf(1))).data!;
+      final wrong = Uint8List.fromList(prepared.dataToBeSigned)..[50] ^= 1;
+      final r = Nfcsigner.completePdfSignature(
+        prepared: prepared,
+        signature: testRsaSign(wrong),
+        certificate: base64.decode(_certB64),
+      );
+      expect(r.isSuccess, isFalse);
+      expect(r.data, isNull);
+    });
+
+    test('PDF bị sửa sau bước chuẩn bị → invalidParameters', () async {
+      final prepared = (await Nfcsigner.preparePdfSignature(pdfBytes: _minimalPdf(1))).data!;
+      final json = prepared.toJson();
+      final pdf = base64.decode(json['pdf'] as String)..[10] ^= 1;
+      json['pdf'] = base64.encode(pdf);
+      expect(() => PdfPreparedSignature.fromJson(json), throwsArgumentError);
+
+      final tampered = PdfPreparedSignature(
+        pdf: pdf,
+        contentsOffset: prepared.contentsOffset,
+        reservedBytes: prepared.reservedBytes,
+        signedAttributes: prepared.signedAttributes,
+      );
+      final r = Nfcsigner.completePdfSignature(
+        prepared: tampered,
+        signature: testRsaSign(prepared.dataToBeSigned),
+        certificate: base64.decode(_certB64),
+      );
+      expect(r.status, CardStatus.invalidParameters);
+    });
+  });
 }

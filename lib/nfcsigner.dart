@@ -8,10 +8,10 @@ import 'models/service_result.dart'; // Import ServiceResult
 import 'models/pdf_signature_config.dart';
 import 'models/xml_signature_config.dart';
 import 'src/xml_signer.dart';
+import 'src/pdf/cms.dart' show RsaVerifier;
 import 'src/pdf/pdf_document.dart' show PdfFormatException;
 import 'src/pdf/pdf_incremental_signer.dart';
 import 'src/pdf/signature_appearance.dart';
-import 'src/sim/mssp_client.dart';
 
 // Xuất các model để người dùng plugin có thể truy cập dễ dàng
 export 'models/service_result.dart';
@@ -23,7 +23,7 @@ export 'src/xml_signer.dart';
 export 'src/card_session.dart';
 export 'src/card_prompt.dart';
 export 'src/card_reader_state.dart';
-export 'src/sim/mssp_client.dart' show MsspConfig, MsspClient, MsspException;
+export 'src/pdf/pdf_incremental_signer.dart' show PdfPreparedSignature, PdfSignatureMismatchException;
 /// Enum định nghĩa vai trò của khóa trên thẻ.
 enum KeyRole {
   /// Khóa dùng để ký (Signature)
@@ -515,52 +515,145 @@ class Nfcsigner {
     );
   }
 
-  /// Ký PDF bằng SIM-PKI qua dịch vụ MSSP của Ban Cơ yếu Chính phủ.
+  /// Ký PDF bằng chữ ký lấy từ dịch vụ bên ngoài (ví dụ SIM-PKI qua MSSP),
+  /// bước 1: thêm trường chữ ký vào PDF và tính dữ liệu cần ký.
   ///
-  /// Luồng: lấy certificate theo [phone] → chuẩn bị PDF → gửi DigestInfo tới
-  /// MSSP → người dùng xác nhận và **nhập PIN trên chính điện thoại có SIM**
-  /// (app không bao giờ nhận PIN SIM) → nhận chữ ký → ghép vào PDF.
-  ///
-  /// [onVerificationCode] được gọi với mã giao dịch 6 số ngay trước khi gửi
-  /// yêu cầu: hiển thị mã này để người dùng đối chiếu với mã hiện trên điện
-  /// thoại (`%%VC%%` trong [displayMessage]) trước khi nhập PIN.
-  ///
-  /// Hàm chờ tối đa [MsspConfig.signTimeout] (mặc định 300 giây).
-  static Future<ServiceResult<Uint8List>> signPdfWithSim({
+  /// Gửi `prepared.dataToBeSigned` (DigestInfo SHA-256, DER) làm
+  /// `DataToBeSigned` của yêu cầu ký (MSSP: MSS_Format PKCS1), rồi gọi
+  /// [completePdfSignature] với chữ ký và certificate nhận được.
+  /// `prepared` lưu được bằng `toJson()` / `PdfPreparedSignature.fromJson`.
+  static Future<ServiceResult<PdfPreparedSignature>> preparePdfSignature({
     required Uint8List pdfBytes,
-    required String phone,
-    required MsspConfig mssp,
     String reason = 'Ký duyệt!',
     String location = '',
     PdfSignatureConfig? signatureConfig,
-    String displayMessage = MsspClient.defaultDisplayMessage,
-    void Function(String verificationCode)? onVerificationCode,
-    @visibleForTesting MsspClient? client,
-  }) async {
-    final mssClient = client ?? MsspClient(mssp);
-    final cert = await mssClient.getCertificate(phone);
-    if (!cert.isSuccess || cert.data == null) return _failAs(cert);
-
-    return _signPdfWith(
-      pdfBytes: pdfBytes,
-      reason: reason,
-      location: location,
-      config: signatureConfig ?? const PdfSignatureConfig(),
-      sign: (digestInfo) async {
-        onVerificationCode?.call(MsspClient.verificationCode(digestInfo));
-        final sig = await mssClient.sign(
-          phone: phone,
-          dataToBeSigned: digestInfo,
-          displayMessage: displayMessage,
+  }) =>
+      _pdfGuard(() async {
+        final config = signatureConfig ?? const PdfSignatureConfig();
+        final signDate = config.signDate ?? DateTime.now();
+        return PdfIncrementalSigner.prepare(
+          pdf: pdfBytes,
+          signingTime: signDate,
+          field: await _signatureField(config, reason, location, signDate),
         );
-        if (!sig.isSuccess || sig.data == null) return _failAs(sig);
-        return ServiceResult.success((signature: sig.data!, certificate: cert.data!));
-      },
-    );
+      });
+
+  /// Bước 2: ghép chữ ký vào PDF đã chuẩn bị bởi [preparePdfSignature].
+  ///
+  /// - [signature]: chữ ký RSA PKCS#1 v1.5 trên `prepared.dataToBeSigned`
+  ///   (MSSP: `MSS_Signature/Base64Signature`). Nhận byte thô hoặc chuỗi
+  ///   base64 dạng byte.
+  /// - [certificate]: certificate của người ký (MSSP: `MSS_Registration` →
+  ///   `X509Certificate`). Nhận DER, base64 (kể cả base64 hai lần như
+  ///   `vgca.mssp.jar` trả về) hoặc PEM.
+  ///
+  /// Chữ ký được kiểm tra bằng khoá công khai trong certificate trước khi ghi.
+  static ServiceResult<Uint8List> completePdfSignature({
+    required PdfPreparedSignature prepared,
+    required Uint8List signature,
+    required Uint8List certificate,
+  }) {
+    try {
+      final cert = _decodeDer(certificate, 'Certificate');
+      return ServiceResult.success(PdfIncrementalSigner.complete(
+        prepared: prepared,
+        signature: _decodeSignature(signature, cert),
+        certificate: cert,
+      ));
+    } catch (e) {
+      return _pdfError(e);
+    }
+  }
+
+  /// Certificate: DER, hoặc base64 / PEM (có thể lồng nhau tối đa 2 lớp).
+  static Uint8List _decodeDer(Uint8List data, String what) {
+    var bytes = data;
+    for (var i = 0; i < 3 && !(bytes.isNotEmpty && bytes[0] == 0x30); i++) {
+      final text = latin1
+          .decode(bytes, allowInvalid: true)
+          .replaceAll(RegExp(r'-----[A-Z ]+-----'), '')
+          .replaceAll(RegExp(r'\s'), '');
+      try {
+        bytes = base64.decode(text);
+      } on FormatException {
+        break;
+      }
+    }
+    if (bytes.isEmpty || bytes[0] != 0x30) {
+      throw ArgumentError('$what không đọc được (cần DER, base64 hoặc PEM)');
+    }
+    return bytes;
+  }
+
+  /// Chữ ký: byte thô dài bằng modulus RSA; nếu không, thử giải base64.
+  static Uint8List _decodeSignature(Uint8List data, Uint8List cert) {
+    final (n, _) = RsaVerifier.rsaPublicKey(cert);
+    final len = (n.bitLength + 7) ~/ 8;
+    if (data.length == len) return data;
+    try {
+      final text = latin1.decode(data).replaceAll(RegExp(r'\s'), '');
+      final decoded = base64.decode(text);
+      if (decoded.length == len) return decoded;
+    } on FormatException {
+      // rơi xuống lỗi bên dưới
+    }
+    throw ArgumentError('Chữ ký dài ${data.length} byte, khoá RSA cần $len byte');
   }
 
   static ServiceResult<T> _failAs<T>(ServiceResult<Object?> r) => ServiceResult.failure(
       status: r.status, message: r.message, sw1: r.sw1, sw2: r.sw2);
+
+  static Future<PdfSignatureField> _signatureField(
+      PdfSignatureConfig config, String reason, String location, DateTime signDate) async {
+    String two(int v) => v.toString().padLeft(2, '0');
+    final dateText = '${two(signDate.day)}/${two(signDate.month)}/${signDate.year} '
+        '${two(signDate.hour)}:${two(signDate.minute)}:${two(signDate.second)}';
+
+    final appearance = await SignatureAppearanceRenderer.render(
+      width: config.width,
+      height: config.height,
+      signatureImage: config.signatureImage,
+      imageWidth: config.signatureImageWidth,
+      imageHeight: config.signatureImageHeight,
+      lines: [
+        if (config.signerName?.isNotEmpty == true) 'Ký bởi: ${config.signerName}',
+        'Ngày ký: $dateText',
+        if (reason.isNotEmpty) 'Lý do: $reason',
+        if (location.isNotEmpty) 'Nơi ký: $location',
+        if (config.contact?.isNotEmpty == true) 'Liên hệ: ${config.contact}',
+      ],
+    );
+    return PdfSignatureField(
+      pageNumber: config.pageNumber,
+      x: config.x,
+      y: config.y,
+      width: config.width,
+      height: config.height,
+      signerName: config.signerName,
+      reason: reason,
+      location: location,
+      contactInfo: config.contact,
+      appearance: appearance,
+    );
+  }
+
+  static Future<ServiceResult<T>> _pdfGuard<T>(Future<T> Function() body) async {
+    try {
+      return ServiceResult.success(await body());
+    } catch (e) {
+      return _pdfError(e);
+    }
+  }
+
+  static ServiceResult<T> _pdfError<T>(Object e) => switch (e) {
+        PdfSignatureMismatchException() =>
+          ServiceResult.failure(status: CardStatus.unknownError, message: e.toString()),
+        PdfFormatException() => ServiceResult.failure(
+            status: CardStatus.invalidParameters, message: 'PDF không hợp lệ: ${e.message}'),
+        ArgumentError() => ServiceResult.failure(
+            status: CardStatus.invalidParameters, message: '${e.message}'),
+        _ => ServiceResult.failure(status: CardStatus.unknownError, message: 'Lỗi ký PDF: $e'),
+      };
 
   static Future<ServiceResult<Uint8List>> _signPdfWith({
     required Uint8List pdfBytes,
@@ -574,40 +667,10 @@ class Nfcsigner {
     ServiceResult<Object?>? signFailure;
     try {
       final signDate = config.signDate ?? DateTime.now();
-      String two(int v) => v.toString().padLeft(2, '0');
-      final dateText = '${two(signDate.day)}/${two(signDate.month)}/${signDate.year} '
-          '${two(signDate.hour)}:${two(signDate.minute)}:${two(signDate.second)}';
-
-      final appearance = await SignatureAppearanceRenderer.render(
-        width: config.width,
-        height: config.height,
-        signatureImage: config.signatureImage,
-        imageWidth: config.signatureImageWidth,
-        imageHeight: config.signatureImageHeight,
-        lines: [
-          if (config.signerName?.isNotEmpty == true) 'Ký bởi: ${config.signerName}',
-          'Ngày ký: $dateText',
-          if (reason.isNotEmpty) 'Lý do: $reason',
-          if (location.isNotEmpty) 'Nơi ký: $location',
-          if (config.contact?.isNotEmpty == true) 'Liên hệ: ${config.contact}',
-        ],
-      );
-
       final signed = await PdfIncrementalSigner.sign(
         pdf: pdfBytes,
         signingTime: signDate,
-        field: PdfSignatureField(
-          pageNumber: config.pageNumber,
-          x: config.x,
-          y: config.y,
-          width: config.width,
-          height: config.height,
-          signerName: config.signerName,
-          reason: reason,
-          location: location,
-          contactInfo: config.contact,
-          appearance: appearance,
-        ),
+        field: await _signatureField(config, reason, location, signDate),
         signer: (digestInfo) async {
           final r = await sign(digestInfo);
           if (!r.isSuccess || r.data == null) {
@@ -620,17 +683,8 @@ class Nfcsigner {
       return ServiceResult.success(signed);
     } on _CardSigningFailed {
       return _failAs(signFailure!);
-    } on PdfSignatureMismatchException catch (e) {
-      return ServiceResult.failure(status: CardStatus.unknownError, message: e.toString());
-    } on PdfFormatException catch (e) {
-      return ServiceResult.failure(
-          status: CardStatus.invalidParameters, message: 'PDF không hợp lệ: ${e.message}');
-    } on ArgumentError catch (e) {
-      return ServiceResult.failure(
-          status: CardStatus.invalidParameters, message: '${e.message}');
     } catch (e) {
-      return ServiceResult.failure(
-          status: CardStatus.unknownError, message: 'Lỗi ký PDF: $e');
+      return _pdfError(e);
     }
   }
 

@@ -15,8 +15,8 @@
 * Nền tảng chưa hỗ trợ một hàm trả `CardStatus.operationNotSupported` thay vì `unknownError`.
 
 ### Tính năng
-* Ký PDF bằng SIM-PKI: `Nfcsigner.signPdfWithSim` gọi trực tiếp MSSP của Ban Cơ yếu (SOAP 1.2, TLS hai chiều), kèm mã xác thực giao dịch và ánh xạ mã lỗi MSSP. Thêm quyền INTERNET trên Android.
-* Chữ ký (thẻ hoặc SIM) được kiểm tra bằng khoá công khai trong certificate trước khi ghi vào PDF.
+* Ký PDF bằng chữ ký từ dịch vụ ngoài (SIM-PKI/MSSP…): `Nfcsigner.preparePdfSignature` trả DigestInfo cần ký, `Nfcsigner.completePdfSignature` ghép chữ ký + certificate vào PDF. `PdfPreparedSignature` lưu/khôi phục được bằng JSON.
+* Chữ ký (thẻ hoặc dịch vụ ngoài) được kiểm tra bằng khoá công khai trong certificate trước khi ghi vào PDF.
 * Android: `internalAuthenticate`, `getPinRetryCounter`, `isCardReaderAttached`, sự kiện `CardPrompt.events` và `CardReaderState.changes`.
 * Windows, Linux: `internalAuthenticate`. iOS: nhận `cancelNfcWait`.
 * macOS: `signPdf` (dùng chung bộ ký PDF bằng Dart).
